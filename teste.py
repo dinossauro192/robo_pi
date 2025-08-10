@@ -9,8 +9,6 @@ from luma.oled.device import ssd1306
 from luma.core.interface.serial import i2c
 from PIL import Image, ImageDraw, ImageFont
 import pyttsx3
-import audioop
-import noisereduce as nr
 
 # Configurações do Display OLED
 serial = i2c(port=1, address=0x3C)
@@ -24,87 +22,57 @@ class IVAAssistant:
         self.audio_queue = queue.Queue()
         self.sample_rate = 16000
         self.channels = 1
-        self.audio_threshold = 500  # Limite para detecção de voz
         
         # Configuração de Áudio
         sd.default.samplerate = self.sample_rate
         sd.default.channels = self.channels
-        sd.default.dtype = 'int16'
         
         # Inicializa síntese de voz
         self.engine = pyttsx3.init()
         self.engine.setProperty('rate', 150)
-        
-        # Expressões faciais
-        self.expressions = {
-            "sleep": self.draw_sleep,
-            "listen": self.draw_listen,
-            "think": self.draw_think,
-            "speak": self.draw_speak
-        }
-        
-        self.current_expression = "sleep"
-        self.update_display()
 
-    def process_audio(self, audio_data):
-        """Processamento avançado do áudio"""
-        # Converte para numpy array
-        audio = np.frombuffer(audio_data, dtype=np.int16)
+    def draw_expression(self, expression):
+        """Desenha expressões faciais básicas no OLED"""
+        img = Image.new('1', (device.width, device.height))
+        draw = ImageDraw.Draw(img)
         
-        # Redução de ruído
-        audio = nr.reduce_noise(y=audio, sr=self.sample_rate)
-        
-        # Normalização
-        audio = audio / np.max(np.abs(audio))
-        
-        return audio
+        if expression == "neutral":
+            draw.ellipse((30, 20, 60, 50), outline=255, fill=0)  # Olho esquerdo
+            draw.ellipse((70, 20, 100, 50), outline=255, fill=0)  # Olho direito
+            draw.line((40, 70, 90, 70), fill=255, width=2)        # Boca neutra
+            
+        elif expression == "listening":
+            draw.ellipse((30, 20, 60, 50), outline=255, fill=0)
+            draw.ellipse((70, 20, 100, 50), outline=255, fill=0)
+            draw.arc((40, 60, 90, 80), 0, 180, fill=255, width=2)  # Boca aberta
+            
+        device.display(img)
+
+    def audio_callback(self, indata, frames, time, status):
+        """Callback para captura de áudio"""
+        self.audio_queue.put(indata.copy())
 
     def listen(self):
-        """Captura áudio com detecção de voz ativada"""
-        self.set_expression("listen")
+        """Captura áudio do microfone"""
+        self.draw_expression("listening")
+        print("\nOuvindo... (diga 'IVA' para ativar)")
         
-        print("\n🔊 Ouvindo... (diga 'IVA' para ativar)")
         with sd.InputStream(callback=self.audio_callback):
-            while True:
-                audio_data = self.audio_queue.get()
-                if self.is_speech(audio_data):
-                    return self.record_command()
-
-    def record_command(self):
-        """Grava um comando de voz completo"""
-        frames = []
-        silence_frames = 0
-        max_silence = 3  # 3 segundos de silêncio para parar
-        
-        print("🎤 Gravando comando...")
-        with sd.InputStream(callback=self.audio_callback):
-            while silence_frames < max_silence:
-                audio_data = self.audio_queue.get()
-                frames.append(audio_data)
-                if not self.is_speech(audio_data):
-                    silence_frames += 1
-                else:
-                    silence_frames = 0
-        
-        return b''.join(frames)
-
-    def is_speech(self, audio_data):
-        """Detecta se há voz no áudio usando RMS"""
-        rms = audioop.rms(audio_data, 2)
-        return rms > self.audio_threshold
+            audio = []
+            for _ in range(int(5 * self.sample_rate / 1024)):  # Grava por 5 segundos
+                audio.append(self.audio_queue.get())
+            
+            return np.concatenate(audio)
 
     def understand(self, audio):
         """Reconhecimento de fala com Whisper"""
-        self.set_expression("think")
+        self.draw_expression("neutral")
         
         try:
-            # Converte para float32 e normaliza
-            audio = np.frombuffer(audio, dtype=np.int16)
-            audio = audio.astype(np.float32) / 32768.0
-            
+            audio = audio.astype(np.float32) / 32768.0  # Normaliza
             result = self.model.transcribe(audio)
             text = result["text"].lower().strip()
-            print(f"👂 Reconhecido: {text}")
+            print(f"Reconhecido: {text}")
             return text
         except Exception as e:
             print(f"Erro no reconhecimento: {e}")
@@ -112,33 +80,19 @@ class IVAAssistant:
 
     def respond(self, text):
         """Responde por voz e display"""
-        self.set_expression("speak")
-        print(f"🗣️ IVA: {text}")
+        self.draw_expression("listening")
+        print(f"IVA: {text}")
         
         self.engine.say(text)
         self.engine.runAndWait()
-        self.set_expression("sleep")
-
-    # Métodos de Display (expressões faciais)
-    def set_expression(self, expression):
-        self.current_expression = expression
-        self.update_display()
-
-    def update_display(self):
-        self.expressions[self.current_expression]()
-
-    def draw_sleep(self):
-        # Implemente suas expressões aqui
-        pass
-        
-    # [...] (outros métodos de desenho)
+        self.draw_expression("neutral")
 
 def main():
     assistant = IVAAssistant()
     
     try:
         while True:
-            # Aguarda ativação por voz
+            # Aguarda comando
             audio = assistant.listen()
             command = assistant.understand(audio)
             
